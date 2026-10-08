@@ -1,7 +1,6 @@
 <?php
-session_start();
+require_once __DIR__ . '/../inc/bootstrap.php';
 
-session_destroy();
-
-header("Location: ../index.php");
-exit(); ?>
+unset($_SESSION['is_admin']);
+header('Location: login.php');
+exit;

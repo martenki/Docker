@@ -1,134 +1,124 @@
 <?php
-include("config.php");
-session_start();
+require_once __DIR__ . '/inc/bootstrap.php';
 
-// kui ID puudub, tagasi avalehele
-if (!isset($_GET["id"])) {
-    header("Location: index.php");
-    exit();
+$carId = filter_input(INPUT_GET, 'id', FILTER_VALIDATE_INT);
+if (!$carId || $carId < 1) {
+    header('Location: index.php');
+    exit;
 }
 
-$car_id = (int)$_GET["id"];
-$message = "";
-
-// auto andmed
-$q = mysqli_prepare($yhendus, "SELECT * FROM cars WHERE id=?");
-mysqli_stmt_bind_param($q, "i", $car_id);
-mysqli_stmt_execute($q);
-$res = mysqli_stmt_get_result($q);
-$auto = mysqli_fetch_assoc($res);
-
-if (!$auto) {
-    die("Autot ei leitud");
+$statement = $yhendus->prepare('SELECT * FROM cars WHERE id = ?');
+$statement->bind_param('i', $carId);
+$statement->execute();
+$car = $statement->get_result()->fetch_assoc();
+if (!$car) {
+    http_response_code(404);
+    $page_title = 'Autot ei leitud';
+    require __DIR__ . '/inc/header.php';
+    echo '<main class="container py-5"><h1>Autot ei leitud</h1><p>Valitud autot pole enam saadaval.</p><a href="index.php">Tagasi autode juurde</a></main>';
+    require __DIR__ . '/inc/footer.php';
+    exit;
 }
 
-// kui vorm saadetud
-if ($_SERVER["REQUEST_METHOD"] === "POST") {
+$message = '';
+$messageType = 'danger';
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (!verify_csrf()) {
+        $message = 'Vorm aegus. Palun laadi leht uuesti ja proovi uuesti.';
+    } elseif (!isset($_SESSION['user_id'])) {
+        $message = 'Broneerimiseks logi esmalt sisse või loo kasutajakonto.';
+    } elseif ($car['status'] !== 'vaba') {
+        $message = 'See auto ei ole praegu renditav.';
+    } else {
+        $startDate = (string)($_POST['start_date'] ?? '');
+        $endDate = (string)($_POST['end_date'] ?? '');
+        $start = DateTimeImmutable::createFromFormat('!Y-m-d', $startDate);
+        $end = DateTimeImmutable::createFromFormat('!Y-m-d', $endDate);
+        $today = new DateTimeImmutable('today');
+        $validStart = $start && $start->format('Y-m-d') === $startDate;
+        $validEnd = $end && $end->format('Y-m-d') === $endDate;
 
-    $start_date = $_POST["start_date"] ?? "";
-    $end_date   = $_POST["end_date"] ?? "";
-
-    if ($start_date && $end_date) {
-
-        $start = new DateTime($start_date);
-        $end   = new DateTime($end_date);
-
-        if ($start > $end) {
-            $message = "<div class='alert alert-danger'>Kuupäevad on valed.</div>";
+        if (!$validStart || !$validEnd || $start < $today || $end < $start) {
+            $message = 'Vali kehtiv kuupäevavahemik, mis algab täna või hiljem ja lõpeb alguskuupäeval või pärast seda.';
         } else {
+            $days = (int)$start->diff($end)->days + 1;
+            $total = $days * (float)$car['price'];
+            try {
+                $yhendus->begin_transaction();
+                $lockCar = $yhendus->prepare('SELECT status FROM cars WHERE id = ? FOR UPDATE');
+                $lockCar->bind_param('i', $carId);
+                $lockCar->execute();
+                $lockedCar = $lockCar->get_result()->fetch_assoc();
 
-            $days = $start->diff($end)->days + 1;
-            $total = $days * $auto["price"];
-
-            $user_id = $_SESSION["user_id"] ?? 1;
-
-            // kontroll kas juba broneeritud
-            $check = mysqli_prepare($yhendus,
-                "SELECT id FROM reservations 
-                 WHERE car_id=? 
-                 AND status='active' 
-                 AND (? <= end_date) 
-                 AND (? >= start_date)"
-            );
-
-            mysqli_stmt_bind_param($check, "iss", $car_id, $end_date, $start_date);
-            mysqli_stmt_execute($check);
-            $r = mysqli_stmt_get_result($check);
-
-            if (mysqli_num_rows($r) > 0) {
-                $message = "<div class='alert alert-danger'>See aeg on juba kinni.</div>";
-            } else {
-
-                $ins = mysqli_prepare($yhendus,
-                    "INSERT INTO reservations 
-                     (user_id, car_id, start_date, end_date, total_price, status) 
-                     VALUES (?, ?, ?, ?, ?, 'active')"
-                );
-
-                mysqli_stmt_bind_param($ins, "iissd", $user_id, $car_id, $start_date, $end_date, $total);
-
-                if (mysqli_stmt_execute($ins)) {
-                    $message = "<div class='alert alert-success mt-3'>
-                        Broneering tehtud! Kokku: " . number_format($total, 2) . " €
-                    </div>";
+                if (!$lockedCar || $lockedCar['status'] !== 'vaba') {
+                    $yhendus->rollback();
+                    $message = 'See auto ei ole praegu renditav.';
                 } else {
-                    $message = "<div class='alert alert-danger'>Midagi läks valesti.</div>";
+                    $overlap = $yhendus->prepare("SELECT id FROM reservations WHERE car_id = ? AND status = 'active' AND start_date <= ? AND end_date >= ? LIMIT 1 FOR UPDATE");
+                    $overlap->bind_param('iss', $carId, $endDate, $startDate);
+                    $overlap->execute();
+                    if ($overlap->get_result()->num_rows > 0) {
+                        $yhendus->rollback();
+                        $message = 'Valitud kuupäevad kattuvad olemasoleva broneeringuga. Palun vali teine periood.';
+                    } else {
+                        $insert = $yhendus->prepare("INSERT INTO reservations (user_id, car_id, start_date, end_date, total_price, status) VALUES (?, ?, ?, ?, ?, 'active')");
+                        $userId = (int)$_SESSION['user_id'];
+                        $insert->bind_param('iissd', $userId, $carId, $startDate, $endDate, $total);
+                        $insert->execute();
+                        $yhendus->commit();
+                        $messageType = 'success';
+                        $message = sprintf('Broneering on kinnitatud. %d päeva · kokku %.2f €.', $days, $total);
+                    }
                 }
+            } catch (mysqli_sql_exception $exception) {
+                $yhendus->rollback();
+                error_log('Broneeringu salvestamine ebaõnnestus: ' . $exception->getMessage());
+                $message = 'Broneeringut ei saanud salvestada. Palun proovi hiljem uuesti.';
             }
         }
     }
 }
+
+$page_title = $car['mark'] . ' ' . $car['model'] . ' - Autorent';
+require __DIR__ . '/inc/header.php';
 ?>
-
-<!doctype html>
-<html lang="et">
-<head>
-    <meta charset="utf-8">
-    <title><?= $auto["mark"] . " " . $auto["model"]; ?></title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-</head>
-<body>
-
-<div class="container py-5">
-
-    <?= $message; ?>
-
-    <div class="row mt-4">
-        <div class="col-md-6">
-            <img src="https://loremflickr.com/800/500/car,<?= $auto['mark']; ?>" class="img-fluid rounded">
-        </div>
-
-        <div class="col-md-6">
-            <h2><?= $auto["mark"] . " " . $auto["model"]; ?></h2>
-
-            <ul class="list-group mb-3">
-                <li class="list-group-item"><b>Aasta:</b> <?= $auto["year"]; ?></li>
-                <li class="list-group-item"><b>Mootor:</b> <?= $auto["motor"]; ?></li>
-                <li class="list-group-item"><b>Käigukast:</b> <?= $auto["transmission"]; ?></li>
-                <li class="list-group-item"><b>Kütus:</b> <?= $auto["fuel"]; ?></li>
-                <li class="list-group-item"><b>Istmed:</b> <?= $auto["seats"]; ?></li>
-                <li class="list-group-item"><b>Hind:</b> <?= $auto["price"]; ?> €/päev</li>
-                <li class="list-group-item"><b>Info:</b> <?= $auto["description"]; ?></li>
-            </ul>
-
-            <form method="POST" class="border p-3 rounded bg-light">
-                <div class="mb-2">
-                    <label>Algus</label>
-                    <input type="date" name="start_date" class="form-control" required>
-                </div>
-
-                <div class="mb-2">
-                    <label>Lõpp</label>
-                    <input type="date" name="end_date" class="form-control" required>
-                </div>
-
-                <button class="btn btn-success w-100 mt-2">Broneeri</button>
-            </form>
-
-            <a href="index.php" class="btn btn-secondary mt-2">Tagasi</a>
-        </div>
+<main class="container py-5">
+  <a href="index.php#autod" class="link-secondary">← Tagasi autode juurde</a>
+  <?php if ($message !== ''): ?>
+    <div class="alert alert-<?= h($messageType) ?> mt-3" role="alert"><?= h($message) ?></div>
+  <?php endif; ?>
+  <div class="row g-4 mt-1">
+    <div class="col-lg-7">
+      <img src="<?= h(car_image($car)) ?>" class="img-fluid rounded-3 w-100" alt="<?= h($car['mark'] . ' ' . $car['model']) ?>">
     </div>
-</div>
-
-</body>
-</html>
+    <div class="col-lg-5">
+      <h1><?= h($car['mark'] . ' ' . $car['model']) ?></h1>
+      <p class="lead"><?= h($car['description'] ?: 'Sobib mugavaks ja turvaliseks sõiduks.') ?></p>
+      <dl class="row">
+        <dt class="col-6">Aasta</dt><dd class="col-6"><?= h($car['year']) ?></dd>
+        <dt class="col-6">Mootor</dt><dd class="col-6"><?= h($car['engine']) ?></dd>
+        <dt class="col-6">Käigukast</dt><dd class="col-6"><?= h($car['transmission']) ?></dd>
+        <dt class="col-6">Kütus</dt><dd class="col-6"><?= h($car['fuel']) ?></dd>
+        <dt class="col-6">Istekohti</dt><dd class="col-6"><?= h($car['seats']) ?></dd>
+        <dt class="col-6">Hind päevas</dt><dd class="col-6 fw-bold"><?= number_format((float)$car['price'], 2, ',', ' ') ?> €</dd>
+      </dl>
+      <?php if ($car['status'] !== 'vaba'): ?>
+        <div class="alert alert-secondary">See auto ei ole praegu renditav.</div>
+      <?php elseif (!isset($_SESSION['user_id'])): ?>
+        <div class="alert alert-info">Broneeringu tegemiseks <a href="login.php">logi sisse</a> või <a href="regamine.php">loo konto</a>.</div>
+      <?php else: ?>
+        <form method="post" class="card card-body bg-light">
+          <?= csrf_field() ?>
+          <h2 class="h5">Vali rendiperiood</h2>
+          <label class="form-label" for="start_date">Alguskuupäev</label>
+          <input class="form-control mb-3" id="start_date" type="date" name="start_date" min="<?= h(date('Y-m-d')) ?>" value="<?= h($_POST['start_date'] ?? '') ?>" required>
+          <label class="form-label" for="end_date">Lõppkuupäev</label>
+          <input class="form-control mb-3" id="end_date" type="date" name="end_date" min="<?= h(date('Y-m-d')) ?>" value="<?= h($_POST['end_date'] ?? '') ?>" required>
+          <p class="small text-secondary">Algus- ja lõppkuupäev arvestatakse mõlemad rendipäevadena.</p>
+          <button class="btn btn-dark" type="submit">Arvuta hind ja broneeri</button>
+        </form>
+      <?php endif; ?>
+    </div>
+  </div>
+</main>
+<?php require __DIR__ . '/inc/footer.php'; ?>

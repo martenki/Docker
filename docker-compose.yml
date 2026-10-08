@@ -1,9 +1,10 @@
-version: '3.8'
-
 services:
   web:
     build: .
     container_name: autorent_web
+    environment:
+      ADMIN_USERNAME: admin
+      ADMIN_PASSWORD_HASH: "$$2y$$10$$D85pk2NArXaMo1P8v6eUGODkvLhTs2aiaY.NnIHpvivh14Xo0V47i"
     ports:
       - "80:80"
     volumes:
@@ -24,8 +25,8 @@ services:
       - "3306:3306"
     volumes:
       - db_data:/var/lib/mysql
-      # SEE RIDA IMPORDIB ANDMEBAASI AUTOMAATSELT:
       - ./car_rent.sql:/docker-entrypoint-initdb.d/car_rent.sql
+      - ./database/migrations/001_rental_schema.sql:/docker-entrypoint-initdb.d/99_rental_schema.sql:ro
 
   phpmyadmin:
     image: phpmyadmin:latest
