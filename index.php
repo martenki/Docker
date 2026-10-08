@@ -88,13 +88,24 @@ require __DIR__ . '/inc/header.php';
         <?php endwhile; ?>
       </div>
       <?php if ($totalPages > 1): ?>
+        <?php
+        $pageGroupSize = 10;
+        $firstPageInGroup = (int)(floor(($page - 1) / $pageGroupSize) * $pageGroupSize) + 1;
+        $lastPageInGroup = min($firstPageInGroup + $pageGroupSize - 1, $totalPages);
+        ?>
         <nav class="mt-4" aria-label="Autode leheküljed">
           <ul class="pagination justify-content-center">
-            <?php for ($number = 1; $number <= $totalPages; $number++): ?>
+            <li class="page-item <?= $firstPageInGroup === 1 ? 'disabled' : '' ?>">
+              <a class="page-link" href="?<?= http_build_query(['q' => $query, 'page' => max(1, $firstPageInGroup - 1)]) ?>" aria-label="Eelmised 10 lehekülge">Eelmised</a>
+            </li>
+            <?php for ($number = $firstPageInGroup; $number <= $lastPageInGroup; $number++): ?>
               <li class="page-item <?= $number === $page ? 'active' : '' ?>">
                 <a class="page-link" href="?<?= http_build_query(['q' => $query, 'page' => $number]) ?>"><?= $number ?></a>
               </li>
             <?php endfor; ?>
+            <li class="page-item <?= $lastPageInGroup === $totalPages ? 'disabled' : '' ?>">
+              <a class="page-link" href="?<?= http_build_query(['q' => $query, 'page' => min($totalPages, $lastPageInGroup + 1)]) ?>" aria-label="Järgmised 10 lehekülge">Järgmised</a>
+            </li>
           </ul>
         </nav>
       <?php endif; ?>
